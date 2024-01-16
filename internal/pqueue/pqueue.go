@@ -7,8 +7,11 @@ import (
 type Item struct {
 	Value    interface{}
 	Priority int64
-	Index    int
+	// 消息的执行时间戳
+	Index int
 }
+
+var h = heap.Interface
 
 // this is a priority queue as implemented by a min heap
 // ie. the 0th element is the *lowest* value
@@ -60,6 +63,7 @@ func (pq *PriorityQueue) Pop() interface{} {
 	return item
 }
 
+// 传入一个指定时间戳 max，倘若堆顶消息时间戳小于等于 max，则 pop 弹出，否则不执行任何操作
 func (pq *PriorityQueue) PeekAndShift(max int64) (*Item, int64) {
 	if pq.Len() == 0 {
 		return nil, 0

@@ -58,8 +58,10 @@ func (p *program) Init(env svc.Environment) error {
 }
 
 func (p *program) Start() error {
+	// 默认配置
 	opts := nsqlookupd.NewOptions()
 
+	// 命令行指定的参数配置
 	flagSet := nsqlookupdFlagSet(opts)
 	flagSet.Parse(os.Args[1:])
 
@@ -68,6 +70,7 @@ func (p *program) Start() error {
 		os.Exit(0)
 	}
 
+	// 解析配置文件的配置
 	var cfg config
 	configFile := flagSet.Lookup("config").Value.String()
 	if configFile != "" {
@@ -78,13 +81,16 @@ func (p *program) Start() error {
 	}
 	cfg.Validate()
 
+	// 将命令行配置和文件配置合并到 opts 上
 	options.Resolve(opts, flagSet, cfg)
+	// 基于配置创建 nsqlookupd 服务
 	nsqlookupd, err := nsqlookupd.New(opts)
 	if err != nil {
 		logFatal("failed to instantiate nsqlookupd", err)
 	}
 	p.nsqlookupd = nsqlookupd
 
+	// 单独启动协程运行 nsdlookup 主程序
 	go func() {
 		err := p.nsqlookupd.Main()
 		if err != nil {

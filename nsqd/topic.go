@@ -20,16 +20,21 @@ type Topic struct {
 
 	sync.RWMutex
 
-	name              string
-	channelMap        map[string]*Channel
-	backend           BackendQueue
+	name string
+	// topic 下的 channel 集合
+	channelMap map[string]*Channel
+	// 当 memoryMsgChan 数据满了，通过该组件将消息持久化落盘。实现上是将数据保存到channel，另外的go routine将会将此channel中的数据写入磁盘
+	backend BackendQueue
+	// 有新消息到达时，在内存中通过此通道向 topic 传递消息
 	memoryMsgChan     chan *Message
 	startChan         chan int
 	exitChan          chan int
 	channelUpdateChan chan int
 	waitGroup         util.WaitGroupWrapper
 	exitFlag          int32
-	idFactory         *guidFactory
+
+	// 消息 ID 生成器
+	idFactory *guidFactory
 
 	ephemeral      bool
 	deleteCallback func(*Topic)
@@ -38,6 +43,7 @@ type Topic struct {
 	paused    int32
 	pauseChan chan int
 
+	// 该主题所属的 nsqd
 	nsqd *NSQD
 }
 
@@ -64,6 +70,7 @@ func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic 
 			opts := nsqd.getOpts()
 			lg.Logf(opts.Logger, opts.LogLevel, lg.LogLevel(level), f, args...)
 		}
+		// 创建文件队列
 		t.backend = diskqueue.New(
 			topicName,
 			nsqd.getOpts().DataPath,
@@ -76,6 +83,7 @@ func NewTopic(topicName string, nsqd *NSQD, deleteCallback func(*Topic)) *Topic 
 		)
 	}
 
+	// 启动 messagePump 协程负责处理发送到该 topic 的消息
 	t.waitGroup.Wrap(t.messagePump)
 
 	t.nsqd.Notify(t, !t.ephemeral)
@@ -100,6 +108,7 @@ func (t *Topic) Exiting() bool {
 // for the given Topic
 func (t *Topic) GetChannel(channelName string) *Channel {
 	t.Lock()
+	// channel 是首次被订阅时创建的
 	channel, isNew := t.getOrCreateChannel(channelName)
 	t.Unlock()
 
@@ -224,8 +233,10 @@ func (t *Topic) put(m *Message) error {
 	if cap(t.memoryMsgChan) > 0 || t.ephemeral || m.deferred != 0 {
 		select {
 		case t.memoryMsgChan <- m:
+			// 写到内存中
 			return nil
 		default:
+			// 内存 chan 已满，则写入到磁盘
 			break // write to backend
 		}
 	}
@@ -246,6 +257,7 @@ func (t *Topic) Depth() int64 {
 
 // messagePump selects over the in-memory and backend queue and
 // writes messages to every channel for this topic
+// topic被构造出来后，会启动一个协程，负责持续接收发送到该 topic 的消息，并将消息逐一发送给 topic 下的每个 channel
 func (t *Topic) messagePump() {
 	var msg *Message
 	var buf []byte
@@ -272,6 +284,7 @@ func (t *Topic) messagePump() {
 		chans = append(chans, c)
 	}
 	t.RUnlock()
+	// 获取基于内存的 channel 和基于磁盘的 channel
 	if len(chans) > 0 && !t.IsPaused() {
 		memoryMsgChan = t.memoryMsgChan
 		backendChan = t.backend.ReadChan()
@@ -280,14 +293,18 @@ func (t *Topic) messagePump() {
 	// main message loop
 	for {
 		select {
+		// 通过内存 channel 接收消息
+		// 当内存队列和磁盘队列中的消息都就绪时，有可能会先将磁盘队列中的消息分发到channel中，也有可能会先将内存队列中的消息分发到channel，这是nsq不能保证消息顺序的原因之一
 		case msg = <-memoryMsgChan:
 		case buf = <-backendChan:
+			// 通过磁盘 channel 接收消息
 			msg, err = decodeMessage(buf)
 			if err != nil {
 				t.nsqd.logf(LOG_ERROR, "failed to decode message - %s", err)
 				continue
 			}
 		case <-t.channelUpdateChan:
+			// 如果 topic 下的 channel 有变更，则需要对 channel 列表进行更新
 			chans = chans[:0]
 			t.RLock()
 			for _, c := range t.channelMap {
@@ -303,6 +320,7 @@ func (t *Topic) messagePump() {
 			}
 			continue
 		case <-t.pauseChan:
+			// 收到topic停止信号
 			if len(chans) == 0 || t.IsPaused() {
 				memoryMsgChan = nil
 				backendChan = nil
@@ -315,6 +333,7 @@ func (t *Topic) messagePump() {
 			goto exit
 		}
 
+		// 遍历 topic 下的所有 channel，将消息发送到每个 channel
 		for i, channel := range chans {
 			chanMsg := msg
 			// copy the message because each channel
@@ -326,10 +345,13 @@ func (t *Topic) messagePump() {
 				chanMsg.Timestamp = msg.Timestamp
 				chanMsg.deferred = msg.deferred
 			}
+			// 如果消息类型是延时消息，将其发送到延时队列
 			if chanMsg.deferred != 0 {
 				channel.PutMessageDeferred(chanMsg, chanMsg.deferred)
 				continue
 			}
+			// 将消息发送到 channel 中
+			// 通过 Channel.memoryMsgChan 或者 Channel.backend，将消息随机传递到某个订阅了该 channel 的 consumer client 对应的 protocolV2.messagePump(...) goroutine 当中
 			err := channel.PutMessage(chanMsg)
 			if err != nil {
 				t.nsqd.logf(LOG_ERROR,

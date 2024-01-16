@@ -19,11 +19,13 @@ type Protocol interface {
 // SendResponse is a server side utility function to prefix data with a length header
 // and write to the supplied Writer
 func SendResponse(w io.Writer, data []byte) (int, error) {
+	// 响应消息长度
 	err := binary.Write(w, binary.BigEndian, int32(len(data)))
 	if err != nil {
 		return 0, err
 	}
 
+	// 响应体内容
 	n, err := w.Write(data)
 	if err != nil {
 		return 0, err

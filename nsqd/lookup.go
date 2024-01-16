@@ -21,12 +21,14 @@ func connectCallback(n *NSQD, hostname string) func(*lookupPeer) {
 		ci["hostname"] = hostname
 		ci["broadcast_address"] = n.getOpts().BroadcastAddress
 
+		// 构造 identify 命令
 		cmd, err := nsq.Identify(ci)
 		if err != nil {
 			lp.Close()
 			return
 		}
 
+		// 向 nsqdlookup 发送 identify 命令，该命令包含了 nsqd 的基本信息(主机名、端口、版本等)
 		resp, err := lp.Command(cmd)
 		if err != nil {
 			n.logf(LOG_ERROR, "LOOKUPD(%s): %s - %s", lp, cmd, err)
@@ -87,15 +89,19 @@ func (n *NSQD) lookupLoop() {
 	}
 
 	// for announcements, lookupd determines the host automatically
+	// 这里创建一个定时器，默认时间间隔是 15 秒
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	// 也是经典的 for + select 方式
 	for {
 		if connect {
+			// 连接每一个 nsqdlookup 服务
 			for _, host := range n.getOpts().NSQLookupdTCPAddresses {
 				if in(host, lookupAddrs) {
 					continue
 				}
 				n.logf(LOG_INFO, "LOOKUP(%s): adding peer", host)
+				// connectCallback
 				lookupPeer := newLookupPeer(host, n.getOpts().MaxBodySize, n.logf,
 					connectCallback(n, hostname))
 				lookupPeer.Command(nil) // start the connection
@@ -109,6 +115,8 @@ func (n *NSQD) lookupLoop() {
 		select {
 		case <-ticker.C:
 			// send a heartbeat and read a response (read detects closed conns)
+			// 每隔一段时间，向 nsqlookupd 发送心跳，以维持存活状态
+			// nsqlookupd 收到 nsqd 服务的 PING 命令请求后，会更新 lastUpdate 记录的时间，消费者通过 nsqlookupd 服务获取 nsqd 服务列表时，会过滤掉 lastUpdate 长时间未更新的 nsqd 节点
 			for _, lookupPeer := range lookupPeers {
 				n.logf(LOG_DEBUG, "LOOKUPD(%s): sending heartbeat", lookupPeer)
 				cmd := nsq.Ping()
@@ -118,6 +126,8 @@ func (n *NSQD) lookupLoop() {
 				}
 			}
 		case val := <-n.notifyChan:
+			// topic 或 channel 状态变更时(如新增 topic)，会将 topic 写入 notifyChan
+			// 这里进行消费，向 NSQDLOOKUP 发送注册或反注册命令
 			var cmd *nsq.Command
 			var branch string
 

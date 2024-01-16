@@ -13,6 +13,7 @@ type RegistrationDB struct {
 }
 
 type Registration struct {
+	// 表示类型，包括 topic、channel等
 	Category string
 	Key      string
 	SubKey   string

@@ -53,9 +53,11 @@ func (p *tcpServer) Handle(conn net.Conn) {
 		return
 	}
 
+	// 基于当前请求的 conn，创建一个新的 client 实例
 	client := prot.NewClient(conn)
 	p.conns.Store(conn.RemoteAddr(), client)
 
+	// 当前请求维度的常驻处理流程
 	err = prot.IOLoop(client)
 	if err != nil {
 		p.nsqd.logf(LOG_ERROR, "client(%s) - %s", conn.RemoteAddr(), err)

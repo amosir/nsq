@@ -49,6 +49,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 	// and avoid a potential race with IDENTIFY (where a client
 	// could have changed or disabled said attributes)
 	messagePumpStartedChan := make(chan bool)
+	// 异步运行 protocolV2.messagePump(...) 方法，在其中会持续负责将需要发送的消息推送该客户端
 	go p.messagePump(client, messagePumpStartedChan)
 	<-messagePumpStartedChan
 
@@ -82,6 +83,8 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 		p.nsqd.logf(LOG_DEBUG, "PROTOCOL(V2): [%s] %s", client, params)
 
 		var response []byte
+		// 读取来自客户端的请求指令，调用 protocolV2.Exec(...) 方法分类处理每一种指令。会根据各类指令，dispatch 到各种处理方法当中
+		// 如 PUB 指令，最终会将消息写入到 topic 下每个channel 中，再由messagePump处理
 		response, err = p.Exec(client, params)
 		if err != nil {
 			ctx := ""
@@ -103,6 +106,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 			continue
 		}
 
+		// 向客户端响应结果，响应的类型是frameTypeResponse，表明是控制帧
 		if response != nil {
 			err = p.Send(client, frameTypeResponse, response)
 			if err != nil {
@@ -121,6 +125,7 @@ func (p *protocolV2) IOLoop(c protocol.Client) error {
 	return err
 }
 
+// 获取 client 中的 tcp 连接，然后向 io writer 中写入数据发往客户端
 func (p *protocolV2) SendMessage(client *clientV2, msg *Message) error {
 	p.nsqd.logf(LOG_DEBUG, "PROTOCOL(V2): writing msg(%s) to client(%s) - %s", msg.ID, client, msg.Body)
 
@@ -175,8 +180,10 @@ func (p *protocolV2) Exec(client *clientV2, params [][]byte) ([]byte, error) {
 	}
 	switch {
 	case bytes.Equal(params[0], []byte("FIN")):
+		// 倘若某条消息已经得到了 consumer 的 ack，则 nsqd 服务端会接收到来自 consumer 发送的 FIN 指令
 		return p.FIN(client, params)
 	case bytes.Equal(params[0], []byte("RDY")):
+		// 消费者向服务端发送 RDY 指令以控制消费速率
 		return p.RDY(client, params)
 	case bytes.Equal(params[0], []byte("REQ")):
 		return p.REQ(client, params)
@@ -211,6 +218,7 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 	var flusherChan <-chan time.Time
 	var sampleRate int32
 
+	// 当前 client 用于接收消费者订阅事件的的channel
 	subEventChan := client.SubEventChan
 	identifyEventChan := client.IdentifyEventChan
 	outputBufferTicker := time.NewTicker(client.OutputBufferTimeout)
@@ -247,6 +255,7 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 		} else if flushed {
 			// last iteration we flushed...
 			// do not select on the flusher ticker channel
+			// 获取 channel 对应的 memoryMsgChan 和 backend
 			memoryMsgChan = subChannel.memoryMsgChan
 			backendMsgChan = subChannel.backend.ReadChan()
 			flusherChan = nil
@@ -301,6 +310,7 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 				goto exit
 			}
 		case b := <-backendMsgChan:
+			// 尝试接收订阅 channel 下的 backendMsgChan
 			if sampleRate > 0 && rand.Int31n(100) > sampleRate {
 				continue
 			}
@@ -311,7 +321,8 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 				continue
 			}
 			msg.Attempts++
-
+			// 发送消息前，先将消息添加到待 ack 确认队列中
+			// 添加消息进入 inFlightPQ 前，会根据用户设置的超时重试时间，推算出消息重试的执行时间，以时间戳作为排序的键，将消息添加进入小顶堆
 			subChannel.StartInFlightTimeout(msg, client.ID, msgTimeout)
 			client.SendingMessage()
 			err = p.SendMessage(client, msg)
@@ -320,13 +331,17 @@ func (p *protocolV2) messagePump(client *clientV2, startedChan chan bool) {
 			}
 			flushed = false
 		case msg := <-memoryMsgChan:
+			// 尝试接收订阅 channel 下的 memoryMsgChan
 			if sampleRate > 0 && rand.Int31n(100) > sampleRate {
 				continue
 			}
 			msg.Attempts++
 
+			// 发送消息前先将消息加入到 inFlightMessages 待重试消息集合
 			subChannel.StartInFlightTimeout(msg, client.ID, msgTimeout)
+			// 更新消息数
 			client.SendingMessage()
+			// 向订阅该 channel 的客户端发送消息
 			err = p.SendMessage(client, msg)
 			if err != nil {
 				goto exit
@@ -580,6 +595,8 @@ func (p *protocolV2) CheckAuth(client *clientV2, cmd, topicName, channelName str
 	return nil
 }
 
+// 在订阅 channel 的 client 集合中添加当前 client
+// 将订阅的 channel 发送到当前 client 的 SubEventChan 中，供 protocolV2.messagePump() goroutine 接收和处理
 func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 	if atomic.LoadInt32(&client.State) != stateInit {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "cannot SUB in current state")
@@ -593,12 +610,14 @@ func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "SUB insufficient number of parameters")
 	}
 
+	// 获取订阅的 topic 名
 	topicName := string(params[1])
 	if !protocol.IsValidTopicName(topicName) {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_TOPIC",
 			fmt.Sprintf("SUB topic name %q is not valid", topicName))
 	}
 
+	// 获取订阅的 channel 名
 	channelName := string(params[2])
 	if !protocol.IsValidChannelName(channelName) {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_CHANNEL",
@@ -614,8 +633,11 @@ func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 	// Avoid adding a client to an ephemeral channel / topic which has started exiting.
 	var channel *Channel
 	for i := 1; ; i++ {
+		// 获取要订阅的主题
 		topic := p.nsqd.GetTopic(topicName)
+		// 获取订阅的 channel
 		channel = topic.GetChannel(channelName)
+		// 将发起订阅请求的客户端添加到目标 topic(channel) 下的客户端列表中
 		if err := channel.AddClient(client.ID, client); err != nil {
 			return nil, protocol.NewFatalClientErr(err, "E_SUB_FAILED", "SUB failed "+err.Error())
 		}
@@ -633,6 +655,7 @@ func (p *protocolV2) SUB(client *clientV2, params [][]byte) ([]byte, error) {
 	atomic.StoreInt32(&client.State, stateSubscribed)
 	client.Channel = channel
 	// update message pump
+	// 将目标 channel 添加到当前 client 的 SubEventChan
 	client.SubEventChan <- channel
 
 	return okBytes, nil
@@ -670,6 +693,7 @@ func (p *protocolV2) RDY(client *clientV2, params [][]byte) ([]byte, error) {
 			fmt.Sprintf("RDY count %d out of range 0-%d", count, p.nsqd.getOpts().MaxRdyCount))
 	}
 
+	// 更新对应消费者的 ReadyCount
 	client.SetReadyCount(count)
 
 	return nil, nil
@@ -685,17 +709,20 @@ func (p *protocolV2) FIN(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "FIN insufficient number of params")
 	}
 
+	// 获取消息的唯一 id
 	id, err := getMessageID(params[1])
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", err.Error())
 	}
 
+	// 调用 Channel.FinishMessage(...) 方法，将消息从 channel 的 inFlightPQ 当中移除
 	err = client.Channel.FinishMessage(client.ID, *id)
 	if err != nil {
 		return nil, protocol.NewClientErr(err, "E_FIN_FAILED",
 			fmt.Sprintf("FIN %s failed %s", *id, err.Error()))
 	}
 
+	// 更新计数器
 	client.FinishedMessage()
 
 	return nil, nil
@@ -769,12 +796,14 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, protocol.NewFatalClientErr(nil, "E_INVALID", "PUB insufficient number of parameters")
 	}
 
+	// 消息发布主题
 	topicName := string(params[1])
 	if !protocol.IsValidTopicName(topicName) {
 		return nil, protocol.NewFatalClientErr(nil, "E_BAD_TOPIC",
 			fmt.Sprintf("PUB topic name %q is not valid", topicName))
 	}
 
+	// 读取消息长度(固定前 4 字节)
 	bodyLen, err := readLen(client.Reader, client.lenSlice)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_BAD_MESSAGE", "PUB failed to read message body size")
@@ -790,6 +819,7 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 			fmt.Sprintf("PUB message too big %d > %d", bodyLen, p.nsqd.getOpts().MaxMsgSize))
 	}
 
+	// 读取消息主体数据
 	messageBody := make([]byte, bodyLen)
 	_, err = io.ReadFull(client.Reader, messageBody)
 	if err != nil {
@@ -800,8 +830,13 @@ func (p *protocolV2) PUB(client *clientV2, params [][]byte) ([]byte, error) {
 		return nil, err
 	}
 
+	// 获取消息所属的 topic
 	topic := p.nsqd.GetTopic(topicName)
+
+	// 创建消息对象
 	msg := NewMessage(topic.GenerateID(), messageBody)
+	// 将消息推送给对应的 topic
+	// 本质上会通过 Topic.memoryMsgChan 或 Topic.backend 进行消息传递，让 topic 的常驻运行 goroutine Topic.messagePump(...) 方法接收到这条消息
 	err = topic.PutMessage(msg)
 	if err != nil {
 		return nil, protocol.NewFatalClientErr(err, "E_PUB_FAILED", "PUB failed "+err.Error())

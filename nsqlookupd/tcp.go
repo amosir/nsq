@@ -19,6 +19,7 @@ func (p *tcpServer) Handle(conn net.Conn) {
 	// The client should initialize itself by sending a 4 byte sequence indicating
 	// the version of the protocol that it intends to communicate, this will allow us
 	// to gracefully upgrade the protocol away from text/line oriented to whatever...
+	// 协议版本
 	buf := make([]byte, 4)
 	_, err := io.ReadFull(conn, buf)
 	if err != nil {
@@ -31,6 +32,7 @@ func (p *tcpServer) Handle(conn net.Conn) {
 	p.nsqlookupd.logf(LOG_INFO, "CLIENT(%s): desired protocol magic '%s'",
 		conn.RemoteAddr(), protocolMagic)
 
+	// 当前只支持 V1 协议，非 V1协议会响应错误
 	var prot protocol.Protocol
 	switch protocolMagic {
 	case "  V1":
@@ -44,8 +46,9 @@ func (p *tcpServer) Handle(conn net.Conn) {
 	}
 
 	client := prot.NewClient(conn)
+	// 保存 nsqd 的地址和对应的连接
 	p.conns.Store(conn.RemoteAddr(), client)
-
+	// 处理 nsqd 的命令，连接正常时会不断地循环执行
 	err = prot.IOLoop(client)
 	if err != nil {
 		p.nsqlookupd.logf(LOG_ERROR, "client(%s) - %s", conn.RemoteAddr(), err)

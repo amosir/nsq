@@ -20,7 +20,8 @@ type NSQLookupd struct {
 	httpListener net.Listener
 	tcpServer    *tcpServer
 	waitGroup    util.WaitGroupWrapper
-	DB           *RegistrationDB
+	// 保存 topic / channel 与 nsqd 服务的对应关系
+	DB *RegistrationDB
 }
 
 func New(opts *Options) (*NSQLookupd, error) {
@@ -31,11 +32,13 @@ func New(opts *Options) (*NSQLookupd, error) {
 	}
 	l := &NSQLookupd{
 		opts: opts,
-		DB:   NewRegistrationDB(),
+		// 创建 map 用于后续保存 topic、channel 和生产者的关系
+		DB: NewRegistrationDB(),
 	}
 
 	l.logf(LOG_INFO, version.String("nsqlookupd"))
 
+	// 初始化 http 协议和 tcp 协议的 listener
 	l.tcpServer = &tcpServer{nsqlookupd: l}
 	l.tcpListener, err = net.Listen("tcp", opts.TCPAddress)
 	if err != nil {
@@ -54,6 +57,7 @@ func New(opts *Options) (*NSQLookupd, error) {
 func (l *NSQLookupd) Main() error {
 	exitCh := make(chan error)
 	var once sync.Once
+	// 统一处理错误
 	exitFunc := func(err error) {
 		once.Do(func() {
 			if err != nil {
@@ -63,6 +67,9 @@ func (l *NSQLookupd) Main() error {
 		})
 	}
 
+	// 单独开启协程分别监听 http server 和 tcp server
+	// 消费者与 nsqlookupd 服务交互是通过 http 方式，不直接走 tcpServer
+	// nsqd 服务与 nsqlookupd 服务之间通过 tcp 方式，由 tcpServer.Handle 进行处理
 	l.waitGroup.Wrap(func() {
 		exitFunc(protocol.TCPServer(l.tcpListener, l.tcpServer, l.logf))
 	})
@@ -71,6 +78,7 @@ func (l *NSQLookupd) Main() error {
 		exitFunc(http_api.Serve(l.httpListener, httpServer, "HTTP", l.logf))
 	})
 
+	// exitFunc 执行过程中会向 exitCh 写入数据，在执行完之前会阻塞当前协程
 	err := <-exitCh
 	return err
 }

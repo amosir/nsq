@@ -30,17 +30,23 @@ func newHTTPServer(l *NSQLookupd) *httpServer {
 		router:     router,
 	}
 
+	// 注册 http 服务路由
+	// 这里使用装饰器对各种路由进行装饰，如加 log 日志，V1 协议版本号等
 	router.Handle("GET", "/ping", http_api.Decorate(s.pingHandler, log, http_api.PlainText))
 	router.Handle("GET", "/info", http_api.Decorate(s.doInfo, log, http_api.V1))
 
 	// v1 negotiate
 	router.Handle("GET", "/debug", http_api.Decorate(s.doDebug, log, http_api.V1))
+	// consumer 调用ConnectToNSQLookupds连接 nsqd 时，实际是请求此路径，这会回返回 topic 和 producer
 	router.Handle("GET", "/lookup", http_api.Decorate(s.doLookup, log, http_api.V1))
+	// 获取 topic 列表
 	router.Handle("GET", "/topics", http_api.Decorate(s.doTopics, log, http_api.V1))
+	// 获取 topic 下的 channel 列表
 	router.Handle("GET", "/channels", http_api.Decorate(s.doChannels, log, http_api.V1))
 	router.Handle("GET", "/nodes", http_api.Decorate(s.doNodes, log, http_api.V1))
 
 	// only v1
+	// 增删 topic 和 channel
 	router.Handle("POST", "/topic/create", http_api.Decorate(s.doCreateTopic, log, http_api.V1))
 	router.Handle("POST", "/topic/delete", http_api.Decorate(s.doDeleteTopic, log, http_api.V1))
 	router.Handle("POST", "/channel/create", http_api.Decorate(s.doCreateChannel, log, http_api.V1))
@@ -119,6 +125,7 @@ func (s *httpServer) doLookup(w http.ResponseWriter, req *http.Request, ps httpr
 
 	channels := s.nsqlookupd.DB.FindRegistrations("channel", topicName, "*").SubKeys()
 	producers := s.nsqlookupd.DB.FindProducers("topic", topicName, "")
+	// 这里会判断 nsqd 服务的不活跃时间，长时间不活跃的 nsqd 服务会被忽略
 	producers = producers.FilterByActive(s.nsqlookupd.opts.InactiveProducerTimeout,
 		s.nsqlookupd.opts.TombstoneLifetime)
 	return map[string]interface{}{

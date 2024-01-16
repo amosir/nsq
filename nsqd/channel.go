@@ -36,23 +36,31 @@ type Consumer interface {
 // messages, timeouts, requeuing, etc.
 type Channel struct {
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
+	// 计数器
 	requeueCount uint64
 	messageCount uint64
 	timeoutCount uint64
 
+	// 读写锁，保证临界资源并发安全
 	sync.RWMutex
 
+	// 所属 topic 名
 	topicName string
-	name      string
-	nsqd      *NSQD
+	// 当前 channel 名
+	name string
+	// 所属的 nsqd 服务
+	nsqd *NSQD
 
+	// memoryMsgChan 如果满了，会通过此组件将消息落盘
 	backend BackendQueue
 
+	// 消息会优先通过 memoryMsgChan 传递
 	memoryMsgChan chan *Message
 	exitFlag      int32
 	exitMutex     sync.RWMutex
 
 	// state tracking
+	// 订阅该 channel 的客户端集合
 	clients        map[int64]Consumer
 	paused         int32
 	ephemeral      bool
@@ -64,11 +72,14 @@ type Channel struct {
 
 	// TODO: these can be DRYd up
 	deferredMessages map[MessageID]*pqueue.Item
-	deferredPQ       pqueue.PriorityQueue
-	deferredMutex    sync.Mutex
+	// 延时消息队列
+	deferredPQ    pqueue.PriorityQueue
+	deferredMutex sync.Mutex
+	// 重试(待确认)消息集合
 	inFlightMessages map[MessageID]*Message
-	inFlightPQ       inFlightPqueue
-	inFlightMutex    sync.Mutex
+	// 待 ack 确认(重试)消息队列，基于一个小顶堆实现，以执行时间戳作为排序的键
+	inFlightPQ    inFlightPqueue
+	inFlightMutex sync.Mutex
 }
 
 // NewChannel creates a new instance of the Channel type and returns a pointer
@@ -447,6 +458,7 @@ func (c *Channel) RemoveClient(clientID int64) {
 func (c *Channel) StartInFlightTimeout(msg *Message, clientID int64, timeout time.Duration) error {
 	now := time.Now()
 	msg.clientID = clientID
+	// 计算消息的重试时间
 	msg.deliveryTS = now
 	msg.pri = now.Add(timeout).UnixNano()
 	err := c.pushInFlightMessage(msg)
@@ -542,6 +554,7 @@ func (c *Channel) popDeferredMessage(id MessageID) (*pqueue.Item, error) {
 	return item, nil
 }
 
+// 向延时队列中添加消息(封装成 pqueue.Item)
 func (c *Channel) addToDeferredPQ(item *pqueue.Item) {
 	c.deferredMutex.Lock()
 	heap.Push(&c.deferredPQ, item)
@@ -559,9 +572,10 @@ func (c *Channel) processDeferredQueue(t int64) bool {
 	dirty := false
 	for {
 		c.deferredMutex.Lock()
+		// 倘若堆顶的消息已经达到执行时间条件，则取出进行执行
 		item, _ := c.deferredPQ.PeekAndShift(t)
 		c.deferredMutex.Unlock()
-
+		// 倘若堆顶的消息都尚未达到执行时间条件，则结束本次任务
 		if item == nil {
 			goto exit
 		}
@@ -572,6 +586,7 @@ func (c *Channel) processDeferredQueue(t int64) bool {
 		if err != nil {
 			goto exit
 		}
+		// 发送延时消息，由  protocolV2.messagePump(..) 方法接收处理
 		c.put(msg)
 	}
 
@@ -590,9 +605,11 @@ func (c *Channel) processInFlightQueue(t int64) bool {
 	dirty := false
 	for {
 		c.inFlightMutex.Lock()
+		// 倘若堆顶的消息已经达到执行时间，则弹出对应的消息
 		msg, _ := c.inFlightPQ.PeekAndShift(t)
 		c.inFlightMutex.Unlock()
 
+		// 倘若堆顶消息未达到执行时间，则结束本次任务
 		if msg == nil {
 			goto exit
 		}
@@ -609,6 +626,7 @@ func (c *Channel) processInFlightQueue(t int64) bool {
 		if ok {
 			client.TimedOutMessage()
 		}
+		// 发送重试消息
 		c.put(msg)
 	}
 

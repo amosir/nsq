@@ -23,6 +23,7 @@ type program struct {
 	nsqd *nsqd.NSQD
 }
 
+// nsqd 服务入口
 func main() {
 	prg := &program{}
 	if err := svc.Run(prg, syscall.SIGINT, syscall.SIGTERM); err != nil {
@@ -55,6 +56,7 @@ func (p *program) Init(env svc.Environment) error {
 
 	options.Resolve(opts, flagSet, cfg)
 
+	// 初始化 nsqd 实例，这里会加载配置，并创建服务的 listener
 	nsqd, err := nsqd.New(opts)
 	if err != nil {
 		logFatal("failed to instantiate nsqd - %s", err)
@@ -65,16 +67,19 @@ func (p *program) Init(env svc.Environment) error {
 }
 
 func (p *program) Start() error {
+	// 加载之前存储的历史数据信息(如 channel、topic 等)
 	err := p.nsqd.LoadMetadata()
 	if err != nil {
 		logFatal("failed to load metadata - %s", err)
 	}
+	// 将元数据信息持久化
 	err = p.nsqd.PersistMetadata()
 	if err != nil {
 		logFatal("failed to persist metadata - %s", err)
 	}
 
 	go func() {
+		// 异步调用 nsqd.Main方法
 		err := p.nsqd.Main()
 		if err != nil {
 			p.Stop()

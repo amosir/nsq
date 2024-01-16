@@ -122,6 +122,7 @@ func (s ClientV2Stats) String() string {
 
 type clientV2 struct {
 	// 64bit atomic vars need to be first for proper alignment on 32bit platforms
+	// 消费者客户端的 Rdy 值，用于控制消息发送速率
 	ReadyCount    int64
 	InFlightCount int64
 	MessageCount  uint64
@@ -155,9 +156,10 @@ type clientV2 struct {
 
 	MsgTimeout time.Duration
 
-	State          int32
-	ConnectTime    time.Time
-	Channel        *Channel
+	State       int32
+	ConnectTime time.Time
+	Channel     *Channel
+	// 接收 RDY 变更事件
 	ReadyStateChan chan int
 	ExitChan       chan int
 
